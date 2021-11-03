@@ -2,14 +2,13 @@ package sessions
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
+	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/duo-labs/webauthn/protocol"
 	"github.com/duo-labs/webauthn/webauthn"
-	"github.com/gin-gonic/gin"
-
 	"github.com/smartcontractkit/chainlink/core/logger"
 	sqlxTypes "github.com/smartcontractkit/sqlx/types"
 )
@@ -32,7 +31,7 @@ type WebAuthnConfiguration struct {
 	RPOrigin string
 }
 
-func BeginWebAuthnRegistration(user User, uwas []WebAuthn, sessionStore *WebAuthnSessionStore, ctx *gin.Context, config WebAuthnConfiguration) (*protocol.CredentialCreation, error) {
+func (store *WebAuthnSessionStore) BeginWebAuthnRegistration(user User, uwas []WebAuthn, config WebAuthnConfiguration) (*protocol.CredentialCreation, error) {
 	webAuthn, err := webauthn.New(&webauthn.Config{
 		RPDisplayName: "Chainlink Operator", // Display Name
 		RPID:          config.RPID,          // Generally the domain name
@@ -41,10 +40,6 @@ func BeginWebAuthnRegistration(user User, uwas []WebAuthn, sessionStore *WebAuth
 
 	if err != nil {
 		return nil, err
-	}
-
-	if sessionStore == nil {
-		return nil, errors.New("SessionStore must not be nil")
 	}
 
 	waUser, err := duoWebAuthUserFromUser(user, uwas)
@@ -67,7 +62,7 @@ func BeginWebAuthnRegistration(user User, uwas []WebAuthn, sessionStore *WebAuth
 	}
 
 	userRegistrationIndexKey := fmt.Sprintf("%s-registration", user.Email)
-	err = sessionStore.SaveWebauthnSession(userRegistrationIndexKey, sessionData)
+	err = store.SaveWebauthnSession(userRegistrationIndexKey, sessionData)
 	if err != nil {
 		return nil, err
 	}
@@ -75,7 +70,7 @@ func BeginWebAuthnRegistration(user User, uwas []WebAuthn, sessionStore *WebAuth
 	return options, nil
 }
 
-func FinishWebAuthnRegistration(user User, uwas []WebAuthn, sessionStore *WebAuthnSessionStore, ctx *gin.Context, config WebAuthnConfiguration) (*webauthn.Credential, error) {
+func (store *WebAuthnSessionStore) FinishWebAuthnRegistration(user User, uwas []WebAuthn, response *http.Request, config WebAuthnConfiguration) (*webauthn.Credential, error) {
 	webAuthn, err := webauthn.New(&webauthn.Config{
 		RPDisplayName: "Chainlink Operator", // Display Name
 		RPID:          config.RPID,          // Generally the domain name
@@ -85,12 +80,8 @@ func FinishWebAuthnRegistration(user User, uwas []WebAuthn, sessionStore *WebAut
 		return nil, err
 	}
 
-	if sessionStore == nil {
-		return nil, errors.New("SessionStore must not be nil")
-	}
-
 	userRegistrationIndexKey := fmt.Sprintf("%s-registration", user.Email)
-	sessionData, err := sessionStore.GetWebauthnSession(userRegistrationIndexKey)
+	sessionData, err := store.GetWebauthnSession(userRegistrationIndexKey)
 	if err != nil {
 		return nil, err
 	}
@@ -100,7 +91,7 @@ func FinishWebAuthnRegistration(user User, uwas []WebAuthn, sessionStore *WebAut
 		return nil, err
 	}
 
-	credential, err := webAuthn.FinishRegistration(waUser, sessionData, ctx.Request)
+	credential, err := webAuthn.FinishRegistration(waUser, sessionData, response)
 	if err != nil {
 		logger.Errorf("Finish registration failed %v", err)
 		return nil, err
@@ -239,24 +230,27 @@ func duoWebAuthUserFromUser(user User, uwas []WebAuthn) (WebAuthnUser, error) {
 // WebAuthnSessionStore is a wrapper around an in memory key value store which provides some helper
 // methods related to webauthn operations.
 type WebAuthnSessionStore struct {
-	InProgressRegistrations map[string]string
+	inProgressRegistrations map[string]string
+	mu                      sync.Mutex
 }
 
 // NewWebAuthnSessionStore returns a new session store.
-func NewWebAuthnSessionStore(keyPairs ...[]byte) *WebAuthnSessionStore {
+func NewWebAuthnSessionStore() *WebAuthnSessionStore {
 	return &WebAuthnSessionStore{
-		InProgressRegistrations: map[string]string{},
+		inProgressRegistrations: map[string]string{},
 	}
 }
 
-// SaveWebauthnSession marhsals and saves the webauthn data to the provided
+// SaveWebauthnSession marshals and saves the webauthn data to the provided
 // key given the request and responsewriter
 func (store *WebAuthnSessionStore) SaveWebauthnSession(key string, data *webauthn.SessionData) error {
 	marshaledData, err := json.Marshal(data)
 	if err != nil {
 		return err
 	}
-	store.InProgressRegistrations[key] = string(marshaledData)
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.inProgressRegistrations[key] = string(marshaledData)
 	return nil
 }
 
@@ -265,7 +259,13 @@ func (store *WebAuthnSessionStore) SaveWebauthnSession(key string, data *webauth
 func (store *WebAuthnSessionStore) GetWebauthnSession(key string) (webauthn.SessionData, error) {
 	sessionData := webauthn.SessionData{}
 
-	assertion, ok := store.InProgressRegistrations[key]
+	store.mu.Lock()
+	assertion, ok := store.inProgressRegistrations[key]
+	if ok {
+		// Delete the value from the session now that it's been read
+		delete(store.inProgressRegistrations, key)
+	}
+	store.mu.Unlock()
 	if !ok {
 		return sessionData, fmt.Errorf("assertion not in challege store")
 	}
@@ -273,8 +273,6 @@ func (store *WebAuthnSessionStore) GetWebauthnSession(key string) (webauthn.Sess
 	if err != nil {
 		return sessionData, err
 	}
-	// Delete the value from the session now that it's been read
-	delete(store.InProgressRegistrations, key)
 	return sessionData, nil
 }
 
