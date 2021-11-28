@@ -142,6 +142,8 @@ func setChainSpecificConfigDefaultSets() {
 	goerli.linkContractAddress = "0x326c977e6efc84e512bb9c30f76e30c160ed06fb"
 	rinkeby := mainnet
 	rinkeby.linkContractAddress = "0x01BE23585060835E02B77ef475b0Cc51aA1e0709"
+	platon := mainnet
+	platon.linkContractAddress = "0xD42F9740853D5549f050a3E8A9A12ee353b43039"
 
 	// xDai currently uses AuRa (like Parity) consensus so finality rules will be similar to parity
 	// See: https://www.poa.network/for-users/whitepaper/poadao-v1/proof-of-authority
@@ -315,6 +317,7 @@ func setChainSpecificConfigDefaultSets() {
 	chainSpecificConfigDefaultSets[1666700000] = harmonyTestnet
 	chainSpecificConfigDefaultSets[65] = okxTestnet
 	chainSpecificConfigDefaultSets[66] = okxMainnet
+	chainSpecificConfigDefaultSets[210309] = platon
 
 	// sanity check
 	for id, c := range chainSpecificConfigDefaultSets {
